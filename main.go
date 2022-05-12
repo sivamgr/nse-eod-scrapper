@@ -15,6 +15,7 @@ import (
 )
 
 var cmEodDataPath string = "/opt/appdata/nse-cm-eod/"
+var tmpPath string = "/tmp"
 
 const maxDays int = 365
 const maxArchiveKeepDays int = 1000
@@ -23,13 +24,13 @@ func downNseCmEodFileForDate(toDownload time.Time) {
 	toDownloadfileName := strings.ToUpper(toDownload.Format("02Jan2006"))
 	ToDownloadURL := fmt.Sprintf("https://archives.nseindia.com/content/historical/EQUITIES/%s/%s/cm%sbhav.csv.zip", toDownloadfileName[5:], toDownloadfileName[2:5], toDownloadfileName)
 	log.Println("To Download ", ToDownloadURL)
-	outZipFilePath := cmEodDataPath + "tmp.zip"
-	unZipPath := cmEodDataPath + "tmp-unzip"
+	outZipFilePath := tmpPath + "/nse-cm-bhav-csv.zip"
+	unZipPath := tmpPath + "/nse-cm-bhav-unzip"
 	extractedFilePath := unZipPath + "/" + fmt.Sprintf("cm%sbhav.csv", toDownloadfileName)
 	archiveDataPath := cmEodDataPath + toDownload.Format("20060102") + ".csv"
 
 	os.Remove(outZipFilePath)
-	os.Remove(unZipPath)
+	os.RemoveAll(unZipPath)
 
 	err := downloadFile(outZipFilePath, ToDownloadURL)
 	if err != nil {
@@ -38,7 +39,13 @@ func downNseCmEodFileForDate(toDownload time.Time) {
 	if exists(outZipFilePath) {
 		unzip(outZipFilePath, unZipPath)
 		if exists(extractedFilePath) {
-			os.Rename(extractedFilePath, archiveDataPath)
+			log.Println("Moving file ", extractedFilePath, " to ", archiveDataPath)
+			err := moveFile(extractedFilePath, archiveDataPath)
+			if err != nil {
+				log.Println("Failed to move file ", err)
+			}
+		} else {
+			log.Println("Missing expected file ", extractedFilePath)
 		}
 	}
 }
@@ -56,6 +63,7 @@ func syncNSEEodData() {
 		toDownload = toDownload.Add(24 * time.Hour)
 		time.Sleep(1 * time.Second)
 	}
+	deleteOldDataFiles(cmEodDataPath)
 }
 
 func tick() {
@@ -70,6 +78,10 @@ func main() {
 		os.MkdirAll(cmEodDataPath, os.ModePerm)
 		log.Printf("Failed to create required appdata directories in /opt/appdata. Switching to %s\n", cmEodDataPath)
 	}
+
+	tmpPath = os.TempDir()
+	log.Println("Data Folder is ", cmEodDataPath)
+	log.Println("Temp Folder is ", tmpPath)
 
 	syncNSEEodData()
 
@@ -95,27 +107,23 @@ func deleteOldDataFiles(dirName string) {
 
 	filepath.Walk(dirName, func(path string, info os.FileInfo, err error) error {
 		//log.Printf("%s\n", path)
-		toDelete := false
+		toDelete := true
 		if (err != nil) || (info.IsDir()) {
 			return nil
 		}
 
-		if strings.HasSuffix(info.Name(), ".csv") {
-			if info.Size() < 1024 {
-				toDelete = true
-			} else if len(info.Name()) == 12 {
-				this_date, err := time.Parse("20060102", info.Name()[:8])
-				if err != nil {
-					return nil
-				}
+		if strings.HasSuffix(info.Name(), ".csv") && (info.Size() > 1024) && (len(info.Name()) == 12) {
+			this_date, err := time.Parse("20060102", info.Name()[:8])
+			if err == nil {
 				file_age := int(to_date.Sub(this_date).Hours() / 24)
 
-				if file_age > maxArchiveKeepDays {
-					toDelete = true
+				if file_age <= maxArchiveKeepDays {
+					toDelete = false
 				}
 			}
 		}
 		if toDelete {
+			log.Println("Removing ", path)
 			os.Remove(path)
 		}
 		return nil
@@ -235,5 +243,29 @@ func unzip(src, dest string) error {
 		}
 	}
 
+	return nil
+}
+
+func moveFile(sourcePath, destPath string) error {
+	inputFile, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("Couldn't open source file: %s", err)
+	}
+	outputFile, err := os.Create(destPath)
+	if err != nil {
+		inputFile.Close()
+		return fmt.Errorf("Couldn't open dest file: %s", err)
+	}
+	defer outputFile.Close()
+	_, err = io.Copy(outputFile, inputFile)
+	inputFile.Close()
+	if err != nil {
+		return fmt.Errorf("Writing to output file failed: %s", err)
+	}
+	// The copy was successful, so now delete the original file
+	err = os.Remove(sourcePath)
+	if err != nil {
+		return fmt.Errorf("Failed removing original file: %s", err)
+	}
 	return nil
 }
